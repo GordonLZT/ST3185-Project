@@ -1,0 +1,89 @@
+```{r pdf}
+# Probability Density Function
+pdf <- function(X) {
+  return(0.5 * exp(-abs(X)))
+}
+```
+
+```{r Part1a}
+N <- 10000
+s <- 1
+X <- numeric(N)
+X[1] <- 0 
+
+Metropolis_Hasting_Algorithm <- function(N, s, X){
+ 
+  for (i in 2:N){
+    x_star <- rnorm(1, mean = X[i-1], sd  = s)
+    r <- (pdf(x_star))/(pdf(X[i-1]))
+    u <- runif(1)
+    
+    if (log(u) < log(r)){
+      X[i] <- x_star 
+    } else {
+      X[i] <- X[i-1]
+    }
+  }
+  
+ return(X)
+}
+
+
+
+X <- Metropolis_Hasting_Algorithm(N, s, X)
+
+# Plot Histogram
+hist(X, breaks = 50, freq = FALSE, col="skyblue", main = "Metropolis Hasting Sample", xlab = "x", ylab = "density")
+
+# Kernel Density Estimation
+kde <- density(X)
+lines(kde, col = "Orange")
+ 
+# Plot True Distribution
+x_true <- seq(-10, 10, length.out = 1000)
+lines(x_true, pdf(x_true), col = "red", lty = 2)
+
+# Report sample mean and standard deviation
+X_mean <- mean(X)
+X_std <- sd(X)
+cat("Sample Mean:", X_mean, "\n")
+cat("Sample Standard Deviation:", X_std, "\n")
+
+```
+``` {r Part 1b}
+# Parameters
+N <- 2000
+s_vals <- seq(0.001, 1, by = 0.01)
+J <- 4
+X <- numeric(N)
+X[1] <- 0  
+
+# Define the function to calculate R-hat
+calculate_r_hat <- function(N, J, s) {
+  Xs <- matrix(0, nrow = N, ncol = J)
+  for (j in 1:J) {
+    X <- Metropolis_Hasting_Algorithm(N, s, X)
+    Xs[, j] <- X
+  }
+  
+  Mj <- apply(Xs, 2, mean)
+  Vj <- apply(Xs, 2, var)
+  W <- mean(Vj)
+  M <- mean(Mj)
+  B <- (N / (J - 1)) * sum((Mj - M)^2)
+  R_hat <- sqrt((B + W) / W)
+  
+  return(R_hat)
+}
+
+# Initialize R-hat values
+R_hat_values <- numeric(length(s_vals))
+
+# Calculate R-hat for each s value
+for (i in 1:length(s_vals)) {
+  R_hat_values[i] <- calculate_r_hat(N, J, s_vals[i])
+}
+
+# Plot R-hat values
+plot(s_vals, R_hat_values, type = "o", col = "skyblue", xlab = "s", ylab = "R-hat Value", main = "R-hat Value vs s")
+```

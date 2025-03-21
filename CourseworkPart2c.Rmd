@@ -1,0 +1,223 @@
+
+```{r Load Library and connect to Database}
+# Load required libraries
+library(DBI)
+library(RSQLite)
+library(tidyverse)
+library(caret)
+library(pROC)
+library(rsample)
+library(purrr)
+library(ggplot2)
+
+# Connect to SQLite database
+conn <- dbConnect(RSQLite::SQLite(), "FlightStats.db")
+```
+
+```{r Query and calling things we need}
+# SQL query to retrieve diverted flights
+query_diverted <- "
+SELECT 
+    f.Year,
+    f.DayOfWeek,
+    f.Month,
+    f.DayofMonth,
+    f.CRSDepTime,
+    f.CRSArrTime,
+    f.UniqueCarrier,
+    f.Origin,
+    f.Dest,
+    f.Distance,
+    f.TaxiIn,
+    f.TaxiOut,
+    f.Diverted
+FROM 
+    flights f
+JOIN (
+    SELECT 
+        Origin,
+        Dest,
+        UniqueCarrier
+    FROM 
+        flights
+    WHERE 
+        Diverted = 1
+        AND Year BETWEEN 1998 AND 2007
+    GROUP BY 
+        UniqueCarrier, Origin, Dest
+    ORDER BY 
+        COUNT(*) DESC
+    LIMIT 
+        25
+) t ON f.Origin = t.Origin AND f.Dest = t.Dest AND f.UniqueCarrier = t.UniqueCarrier
+WHERE 
+    f.Diverted = 1
+    AND f.Year BETWEEN 1998 AND 2007
+ORDER BY 
+    RANDOM()  -- Randomly shuffle the rows
+LIMIT 
+    5000;
+"
+
+# SQL query to retrieve non-diverted flights with random 10000 samples from top 5 UniqueCarriers, Origins, and Dests
+
+query_non_diverted <- "
+SELECT 
+    f.Year,
+    f.DayOfWeek,
+    f.Month,
+    f.DayofMonth,
+    f.CRSDepTime,
+    f.CRSArrTime,
+    f.UniqueCarrier,
+    f.Origin,
+    f.Dest,
+    f.Distance,
+    f.TaxiIn,
+    f.TaxiOut,
+    f.Diverted
+FROM 
+    flights f
+JOIN (
+    SELECT 
+        Origin,
+        Dest,
+        UniqueCarrier
+    FROM 
+        flights
+    WHERE 
+        Diverted = 0
+        AND Year BETWEEN 1998 AND 2007
+    GROUP BY 
+        UniqueCarrier, Origin, Dest
+    ORDER BY 
+        COUNT(*) DESC
+    LIMIT 
+        25
+) t ON f.Origin = t.Origin AND f.Dest = t.Dest AND f.UniqueCarrier = t.UniqueCarrier
+WHERE 
+    f.Diverted = 0
+    AND f.Year BETWEEN 1998 AND 2007
+ORDER BY 
+    RANDOM()  -- Randomly shuffle the rows
+LIMIT 
+    5000;
+"
+
+# Retrieve diverted and non-diverted flights data
+diverted <- dbGetQuery(conn, query_diverted)
+non_diverted <- dbGetQuery(conn, query_non_diverted)
+
+# Combine diverted and non-diverted data
+combined_data <- bind_rows(diverted, non_diverted)
+
+# Convert categorical variables to factors
+combined_data$UniqueCarrier <- factor(combined_data$UniqueCarrier)
+combined_data$Origin <- factor(combined_data$Origin)
+combined_data$Dest <- factor(combined_data$Dest)
+
+# Data cleaning: remove rows with missing values
+combined_data <- combined_data[complete.cases(combined_data), ]
+```
+
+```{r Split data set}
+# Set the seed for reproducibility
+set.seed(123)
+
+# Split the encoded data into training and testing sets (80% train, 20% test)
+trainIndex <- createDataPartition(combined_data$Diverted, p = 0.8, list = FALSE)
+train_data <- combined_data[trainIndex, ]
+test_data <- combined_data[-trainIndex, ]
+```
+
+```{r GLM}
+# Fit logistic regression model without NA values using na.fail
+model <- glm(Diverted ~ ., data = train_data, family = "binomial")
+
+# Summary of the model
+summary(model)
+```
+```{r Prediction}
+# Ensure UniqueCarrier, Dest, and Origin are factor variables
+train_data$UniqueCarrier <- factor(train_data$UniqueCarrier)
+train_data$Dest <- factor(train_data$Dest)
+train_data$Origin <- factor(train_data$Origin)
+
+test_data$UniqueCarrier <- factor(test_data$UniqueCarrier, levels = levels(train_data$UniqueCarrier))
+test_data$Dest <- factor(test_data$Dest, levels = levels(train_data$Dest))
+test_data$Origin <- factor(test_data$Origin, levels = levels(train_data$Origin))
+
+# Ensure Diverted is a factor variable
+train_data$Diverted <- factor(train_data$Diverted)
+test_data$Diverted <- factor(test_data$Diverted, levels = levels(train_data$Diverted))
+
+# Function to fit logistic regression model, calculate evaluation metrics, and generate ROC curve
+evaluate_logistic <- function(train_data, test_data) {
+  # Fit logistic regression model
+  model <- glm(Diverted ~ ., data = train_data, family = "binomial")
+  
+  # Make predictions on test data
+  predictions <- predict(model, newdata = test_data, type = "response")
+  predicted_classes <- ifelse(predictions > 0.5, 1, 0)
+  
+  # Calculate evaluation metrics
+  confusion_matrix <- confusionMatrix(factor(predicted_classes), test_data$Diverted)
+  accuracy <- confusion_matrix$overall["Accuracy"]
+  recall <- confusion_matrix$byClass["Recall"]
+  f1_score <- confusion_matrix$byClass["F1"]
+  
+  # Generate ROC curve
+  roc_obj <- roc(test_data$Diverted, predictions)
+  
+  # Calculate AUC
+  auc_score <- auc(roc_obj)
+  
+  # Return evaluation metrics and AUC score
+  return(c(Accuracy = accuracy, Recall = recall, F1_Score = f1_score, AUC = auc_score))
+}
+
+# Fit logistic regression models and calculate evaluation metrics for each year
+evaluation_results <- map_df(1998:2007, ~evaluate_logistic(train_data, test_data))
+
+# Add the year column to the evaluation results
+evaluation_results$Year <- 1998:2007
+
+# View the evaluation results
+print(evaluation_results)
+```
+
+```{r Loop for Year}
+# Initialize a list to store coefficients for each year
+coefficients_list <- list()
+
+# Loop through each year
+for (year in unique(train_data$Year)) {
+  # Subset the data for the current year
+  year_data <- train_data[train_data$Year == year, ]
+  
+  # Fit logistic regression model
+  model <- glm(Diverted ~ .- Year, data = year_data, family = "binomial")
+  
+  # Store coefficients in a data frame
+  coefficients_df <- data.frame(variable = names(coef(model)), coefficient = coef(model))
+  
+  # Add year column
+  coefficients_df$Year <- year
+  
+  # Append coefficients to the list
+  coefficients_list[[as.character(year)]] <- coefficients_df
+}
+
+# Combine coefficients for all years into a single data frame
+coefficients_df <- do.call(rbind, coefficients_list)
+```
+
+```{r Plotting graph}
+ggplot(coefficients_df, aes(x = variable, y = coefficient, color = as.factor(Year))) +
+  geom_point() +  # Use geom_point() for dot plot
+  theme_minimal() +
+  labs(x = "Variable", y = "Coefficient", color = "Year") +
+  ggtitle("Trend of Coefficients Over Time") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 5)) +  # Adjust size of x-axis text
+  scale_color_manual(name = "Year", values = c("blue", "red", "green", "orange", "purple", "brown", "gray", "pink", "cyan", "magenta"))
+```

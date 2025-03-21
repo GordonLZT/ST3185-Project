@@ -1,0 +1,216 @@
+```{r Import Libraries and Connecting Database}
+# Load required library
+library(RSQLite)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+
+# Connect to SQLite database
+conn <- dbConnect(SQLite(), "FlightStats.db")
+```
+```{r PartA1}
+# SQL query to find Expected Delay based on time of the day
+query <- "
+WITH PartofDay AS (
+    SELECT
+        Year,
+        CASE
+            WHEN TIME >= 500 AND TIME < 1200 THEN 'Morning'
+            WHEN TIME >= 1200 AND TIME < 1700 THEN 'Afternoon'
+            WHEN TIME >= 1700 AND TIME < 2100 THEN 'Evening'
+            ELSE 'Night'
+        END AS TimePeriod,
+        COUNT(*) AS NumberofFlights
+    FROM
+        (
+            SELECT
+                Year,
+                DepTime AS Time
+            FROM
+                flights
+            WHERE Cancelled = 0 AND Diverted = 0
+        ) AS subquery
+    GROUP BY
+        Year, TimePeriod
+),
+DelayedFlights AS (
+    SELECT
+        Year,
+        CASE
+            WHEN TIME >= 500 AND TIME < 1200 THEN 'Morning'
+            WHEN TIME >= 1200 AND TIME < 1700 THEN 'Afternoon'
+            WHEN TIME >= 1700 AND TIME < 2100 THEN 'Evening'
+            ELSE 'Night'
+        END AS TimePeriod,
+        COUNT(*) AS NumberofDelayFlights,
+        AVG(DepDelay) AS AverageDelay
+    FROM
+        (
+            SELECT
+                Year,
+                DepTime AS Time,
+                DepDelay
+            FROM
+                flights
+            WHERE Cancelled = 0 AND Diverted = 0 AND DepDelay > 0 
+        ) AS subquery
+    GROUP BY
+        Year, TimePeriod
+)
+SELECT
+    p.Year,
+    p.TimePeriod,
+    p.NumberofFlights,
+    d.NumberofDelayFlights,
+    d.AverageDelay,
+    (d.NumberofDelayFlights / CAST(p.NumberofFlights AS FLOAT)) * 100 AS Percentage_Chance_of_Delayed_Flights,
+    d.AverageDelay * (d.NumberofDelayFlights / CAST(p.NumberofFlights AS FLOAT)) AS ExpectedDelay
+FROM 
+    PartofDay p
+JOIN
+    DelayedFlights d ON p.Year = d.Year AND p.TimePeriod = d.TimePeriod
+ORDER BY
+    p.Year, p.TimePeriod;
+"
+
+# Execute the query
+parta_df <- dbGetQuery(conn, query)
+
+# Print the result
+print(parta_df)
+```
+```{r Plot PartA1}
+# Define time period order
+time_period_order <- c('Morning', 'Afternoon', 'Evening', 'Night')
+
+# Convert data to tibble (data frame)
+parta_df <- as_tibble(parta_df)
+
+# Plot using ggplot
+parta_df %>%
+  ggplot(aes(x = TimePeriod, y = ExpectedDelay, fill = TimePeriod)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~Year, nrow = 2) +
+  labs(title = "Expected Delay by Time Period", x = "Time Period", y = "Expected Delay") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_brewer(palette = "Set1")
+```
+```{r PartA2}
+# Write the SQL query
+sql_query <- "
+WITH FlightsPerDayOfWeek AS (
+    SELECT 
+        CASE
+            WHEN DayofWeek = 1 THEN 'Mon' 
+            WHEN DayofWeek = 2 THEN 'Tue'
+            WHEN DayofWeek = 3 THEN 'Wed'
+            WHEN DayofWeek = 4 THEN 'Thu'
+            WHEN DayofWeek = 5 THEN 'Fri'
+            WHEN DayofWeek = 6 THEN 'Sat'
+            WHEN DayofWeek = 7 THEN 'Sun'
+        END AS DayofWeek,
+        Year,
+        COUNT(*) AS NumberofFlights,
+        AVG(DepDelay) AS AverageDelay,
+        SUM(CASE WHEN DepDelay > 0 THEN 1 ELSE 0 END) AS NumberofDelayFlights
+    FROM flights
+    WHERE Cancelled = 0 AND Diverted = 0
+    GROUP BY Year, DayofWeek
+)
+SELECT
+    DayofWeek,
+    Year,
+    NumberofFlights,
+    NumberofDelayFlights,
+    AverageDelay,
+    ((NumberofDelayFlights / CAST(NumberofFlights AS FLOAT)) * 100) AS Percentage_Chance_of_Delayed_Flights,
+    AverageDelay * ((NumberofDelayFlights / CAST(NumberofFlights AS FLOAT)) * 100) / 100 AS ExpectedDelay
+FROM FlightsPerDayOfWeek
+ORDER BY Year, DayofWeek;
+"
+
+# Execute the SQL query and fetch the results
+result <- dbGetQuery(conn, sql_query)
+
+# Print the resulting data frame
+print(result)
+```
+```{r Plot PartA2}
+# Define a custom color palette for days of the week
+color_palette <- c("skyblue", "salmon", "lightgreen", "purple", "orange", "yellow", "cyan")
+
+# Plot the data
+result %>%
+  ggplot(aes(x = factor(DayofWeek, levels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")), y = ExpectedDelay, fill = DayofWeek)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~Year, nrow = 2) +
+  labs(title = "Expected Delay by Day of Week for Each Year", x = "Day of Week", y = "Expected Delay") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = color_palette)
+```
+```{r PartB}
+# Execute the SQL query
+partb <- dbGetQuery(conn, "
+  WITH FlightsPerPlane AS (
+    SELECT
+      CASE
+        WHEN planes.year < 1998 THEN 'Old'
+        ELSE 'New'
+      END AS PlaneCondition,
+      flights.Year,
+      COUNT(*) AS NumberofFlights,
+      AVG(DepDelay) AS AverageDelay,
+      SUM(CASE WHEN DepDelay > 0 THEN 1 ELSE 0 END) AS NumberofDelayFlights
+    FROM flights 
+    LEFT JOIN planes ON flights.TailNum = planes.TailNum AND planes.year != 'None' AND planes.year != 0
+    WHERE Cancelled = 0 AND Diverted = 0
+    GROUP BY flights.Year, PlaneCondition
+  )
+  SELECT
+    Year,
+    PlaneCondition,
+    NumberofFlights,
+    NumberofDelayFlights,
+    AverageDelay,
+    (NumberofDelayFlights / CAST(NumberofFlights AS FLOAT)) * 100 AS Percentage_Chance_of_Delayed_Flights,
+    AverageDelay * (NumberofDelayFlights / CAST(NumberofFlights AS FLOAT)) AS ExpectedDelay
+  FROM FlightsPerPlane
+  ORDER BY Year, PlaneCondition
+")
+
+# Print the result
+print(partb)
+```
+```{r Plot PartB}
+# Convert PlaneCondition to factor
+partb$PlaneCondition <- factor(partb$PlaneCondition)
+
+# Plot the line plot
+ggplot(partb, aes(x = Year, y = ExpectedDelay, color = PlaneCondition)) +
+  geom_line() +
+  labs(title = "Expected Delay by Plane Condition Over Years",
+       x = "Year",
+       y = "Expected Delay") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  scale_color_brewer(palette = "Set1")
+
+```
+```{r Anova Test PartB}
+# Perform ANOVA test
+anova_result <- aov(ExpectedDelay ~ PlaneCondition, data = partb)
+
+# Get ANOVA table
+summary(anova_result)
+
+# Extract p-value
+p_value <- summary(anova_result)[[1]]$`Pr(>F)`[1]
+
+# Interpret the result
+alpha <- 0.05
+if (p_value < alpha) {
+  print("Reject null hypothesis: Plane condition significantly affects delay.")
+} else {
+  print("Fail to reject null hypothesis: Plane condition does not significantly affect delay.")
+}
+```
